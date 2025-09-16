@@ -1,6 +1,6 @@
 fastapi
-gunicorn
 uvicorn
+gunicorn          # ✅ for production deployment
 jinja2
 pytest
 requests
@@ -11,3 +11,7 @@ python-multipart
 pillow
 pytesseract
 pydantic
+opencv-python     # 🚨 REQUIRED for preprocessing
+streamlit       # optional — uncomment if using
+httpx           # optional — better async client
+filetype        # optional — extra file validation

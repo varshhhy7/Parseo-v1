@@ -1,58 +1,64 @@
 import shutil
 import time
+import io
 from fastapi.testclient import TestClient
-from app.main import app, BASE_DIR, UPLOAD_DIR  # ✅ Import UPLOAD_DIR
+from app.main import app, BASE_DIR, UPLOAD_DIR, get_settings
+from PIL import Image, ImageChops
 
 client = TestClient(app)
 
 
 def test_get_home():
     response = client.get("/")
-    assert response.text != "<h1>Hello World</h1>"  # Ensure template rendered
+    assert response.text != "<h1>Hello world</h1>"
     assert response.status_code == 200
     assert "text/html" in response.headers["content-type"]
 
 
-def test_post_home():
+def test_invalid_file_upload_error():
     response = client.post("/")
-    assert response.status_code == 200
+    assert response.status_code == 422
     assert "application/json" in response.headers["content-type"]
-    assert response.json() == {"hello": "world"}
+
+
+def test_prediction_upload_missing_headers():
+    img_saved_path = BASE_DIR / "images"
+    for path in img_saved_path.glob("*"):
+        response = client.post("/", files={"file": open(path, "rb")})
+        # should fail because skip_auth=false in .env
+        assert response.status_code == 401
+
+
+def test_prediction_upload():
+    img_saved_path = BASE_DIR / "images"
+    settings = get_settings()
+    for path in img_saved_path.glob("*"):
+        try:
+            img = Image.open(path)
+        except Exception:
+            img = None
+        response = client.post(
+            "/",
+            files={"file": open(path, "rb")},
+            headers={"Authorization": f"Bearer {settings.app_auth_token}"},
+        )
+        if img is None:
+            assert response.status_code == 400
+        else:
+            assert response.status_code == 200
+            data = response.json()
+            assert len(data.keys()) == 2
 
 
 def test_echo_upload():
-    image_saved_path = BASE_DIR / "images"
-
-    # MIME type mapping for common image extensions
-    MIME_MAP = {
-        '.jpg': 'image/jpeg',
-        '.jpeg': 'image/jpeg',
-        '.png': 'image/png',
-        '.gif': 'image/gif',
-        '.webp': 'image/webp',
-        '.bmp': 'image/bmp',
-        '.tiff': 'image/tiff',
-        '.svg': 'image/svg+xml',
-    }
-
-    # Ensure test directory exists and has files
-    assert image_saved_path.exists(), f"Test image directory not found: {image_saved_path}"
-    image_files = list(image_saved_path.glob("*"))
-    assert len(image_files) > 0, "No test images found in 'images/' directory"
-
-    for path in image_files:
-        # Skip if extension not in MIME map
-        if path.suffix.lower() not in MIME_MAP:
-            continue
-
-        with open(path, 'rb') as f:  # ✅ Safe file handling
+    img_saved_path = BASE_DIR / "images"
+    for path in img_saved_path.glob("*"):
+        with open(path, "rb") as f:
             response = client.post("/img-echo/", files={"file": f})
-
         assert response.status_code == 200
-        expected_mime = MIME_MAP[path.suffix.lower()]
-        actual_mime = response.headers.get("content-type", "").split(';')[0].strip()  # Strip charset if present
-        assert actual_mime == expected_mime, f"Expected {expected_mime}, got {actual_mime}"
-
-    # Cleanup: remove all uploaded files after testing
-    shutil.rmtree(UPLOAD_DIR)
-    UPLOAD_DIR.mkdir(exist_ok=True)  # Recreate for next test run
+        # exact echo check
+        with open(path, "rb") as f:
+            original_bytes = f.read()
+        assert response.content == original_bytes
+    shutil.rmtree(UPLOAD_DIR, ignore_errors=True)
+    UPLOAD_DIR.mkdir(exist_ok=True)

@@ -1,96 +1,101 @@
 import pathlib
-from functools import lru_cache
+import os
 import io
 import uuid
+from functools import lru_cache
 from fastapi import (
     FastAPI,
+    Header,
     HTTPException,
     Depends,
     Request,
     File,
     UploadFile,
 )
-from fastapi.responses import HTMLResponse, FileResponse
+import pytesseract
+from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from pydantic_settings import BaseSettings
+from PIL import Image
 
 
-# --- Configuration Management ---
-# Loads application settings from environment variables or .env file.
-# Provides type-safe access to config values like `debug` and `echo_active`.
 class Settings(BaseSettings):
-    debug: bool = False          # Enables debug mode if set to True
-    echo_active: bool = True     # Controls whether image echo endpoint is active
+    app_auth_token: str
+    debug: bool = False
+    echo_active: bool = False
+    app_auth_token_prod: str | None = None
+    skip_auth: bool = False
 
-    model_config = {
-        "env_file": ".env"       # Specifies the .env file to load settings from
-    }
+    class Config:
+        env_file = ".env"
 
 
-# Caches the settings instance to avoid reloading on every request.
 @lru_cache
 def get_settings():
     return Settings()
 
 
-# Initialize global settings
 settings = get_settings()
 DEBUG = settings.debug
 
-
-# --- Path Setup ---
-# Define base and upload directories. Ensure upload directory exists.
 BASE_DIR = pathlib.Path(__file__).parent
 UPLOAD_DIR = BASE_DIR / "uploads"
 
-
-
-# --- FastAPI App & Templates ---
-# Initialize FastAPI app and Jinja2 template engine for HTML rendering.
 app = FastAPI()
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 
-# --- Routes ---
-
-# Home page route — renders an HTML template.
 @app.get("/", response_class=HTMLResponse)
 def home_view(request: Request, settings: Settings = Depends(get_settings)):
-    print(settings.debug)  # Log debug status for visibility
     return templates.TemplateResponse(
-        request=request,
-        name="home.html",
-        context={"abc": 123}   # Pass data to template
+        "home.html", {"request": request, "abc": 123}
     )
 
 
-# POST fallback for home — returns JSON response.
+def verify_auth(authorization=Header(None), settings: Settings = Depends(get_settings)):
+    """
+    Authorization: Bearer <token>
+    """
+    if settings.debug and settings.skip_auth:
+        return
+    if authorization is None:
+        raise HTTPException(detail="Invalid endpoint", status_code=401)
+
+    try:
+        label, token = authorization.split()
+    except ValueError:
+        raise HTTPException(detail="Invalid Authorization format", status_code=401)
+
+    if token != settings.app_auth_token:
+        raise HTTPException(detail="Invalid endpoint", status_code=401)
+
+
 @app.post("/")
-def home_detail_view():
-    return {"hello": "world"}
-
-
-# Image echo endpoint — accepts an image upload and returns the saved file.
-@app.post("/img-echo/", response_class=FileResponse)
-async def img_echo_view(
+async def prediction_view(
     file: UploadFile = File(...),
-    settings: Settings = Depends(get_settings)
+    authorization=Header(None),
+    settings: Settings = Depends(get_settings),
 ):
-    # Block access if echo is disabled in settings
+    verify_auth(authorization, settings)
+    bytes_str = io.BytesIO(await file.read())
+    try:
+        img = Image.open(bytes_str)
+    except Exception:
+        raise HTTPException(detail="Invalid image", status_code=400)
+    preds = pytesseract.image_to_string(img)
+    predictions = [x for x in preds.split("\n")]
+    return {"results": predictions, "original": preds}
+
+
+@app.post("/img-echo/")
+async def img_echo_view(
+    file: UploadFile = File(...), settings: Settings = Depends(get_settings)
+):
     if not settings.echo_active:
-        raise HTTPException(status_code=403, detail="Endpoint disabled")
-    UPLOAD_DIR.mkdir(exist_ok=True)
-    # Read uploaded file contents
-    contents = await file.read()
+        raise HTTPException(detail="Invalid endpoint", status_code=400)
 
-    # Generate unique filename using UUID and original file extension
-    fname = pathlib.Path(file.filename)
-    fext = fname.suffix
-    dest = UPLOAD_DIR / f"{uuid.uuid4()}{fext}"
-
-    # Save file to disk
-    with open(str(dest), 'wb') as out:
-        out.write(contents)
-
-    # Return file as downloadable response
-    return dest
+    # ✅ Return exact uploaded bytes (true echo, avoids Pillow re-encoding)
+    content = await file.read()
+    return StreamingResponse(
+        io.BytesIO(content), media_type=file.content_type, headers={"Content-Disposition": f"inline; filename={file.filename}"}
+    )
