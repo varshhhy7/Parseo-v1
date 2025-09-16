@@ -42,7 +42,7 @@ DEBUG = settings.debug
 # Define base and upload directories. Ensure upload directory exists.
 BASE_DIR = pathlib.Path(__file__).parent
 UPLOAD_DIR = BASE_DIR / "uploads"
-UPLOAD_DIR.mkdir(exist_ok=True)
+
 
 
 # --- FastAPI App & Templates ---
@@ -79,7 +79,7 @@ async def img_echo_view(
     # Block access if echo is disabled in settings
     if not settings.echo_active:
         raise HTTPException(status_code=403, detail="Endpoint disabled")
-
+    UPLOAD_DIR.mkdir(exist_ok=True)
     # Read uploaded file contents
     contents = await file.read()
 
